@@ -1,4 +1,4 @@
-# NegotiatePay
+# Recurrency
 
 Razorpay Buildathon Track 01 — **AI Growth & Agentic Commerce**.
 
