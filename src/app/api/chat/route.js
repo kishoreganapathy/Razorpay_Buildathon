@@ -60,6 +60,13 @@ export async function POST(req) {
           awaitingApproval: true,
           agreedPrice: session.agreedPrice,
           product: session.product,
+          bestOffer: {
+            pricePaise: session.agreedPrice,
+            merchantName: session.product.merchant.name,
+            productName: session.product.name,
+            mrp: session.product.mrp,
+            status: "ACCEPTED",
+          },
         });
       }
 
@@ -87,6 +94,13 @@ export async function POST(req) {
           awaitingApproval: true,
           agreedPrice: agreed,
           product: session.product,
+          bestOffer: {
+            pricePaise: agreed,
+            merchantName: session.product.merchant.name,
+            productName: session.product.name,
+            mrp: session.product.mrp,
+            status: "ACCEPTED",
+          },
         });
       }
 
@@ -185,37 +199,40 @@ async function startSearch(message, parsed, source, user) {
       breakdown: r.breakdown,
     })),
   });
-  await logAudit(session.id, "POLICY_LOADED", "POLICY_ENGINE", {
-    minimumPrice: product.minimumPrice,
-    sellingPrice: product.sellingPrice,
-    maxRounds: product.maxRounds,
-    maxDiscount: product.maxDiscount,
-    concessionMode: product.concessionMode,
+
+  // Construct multi-agent response text
+  let agentBidsText = "🤖 **Multiple AI Merchant Agents Evaluated Your Query:**\n\n";
+  ranked.forEach((r, idx) => {
+    const p = r.product;
+    const isLead = idx === 0;
+    agentBidsText += `• **${p.merchant.name} AI Agent**: "${p.name} at ₹${rupees(p.sellingPrice)} (MRP ₹${rupees(p.mrp)}, ${p.warrantyMonths} Mo Warranty, ${p.deliveryDays}-Day Express Delivery)" ${isLead ? "⭐ *LEADING BID*" : ""}\n`;
   });
 
-  const facts =
-    `Selected ${product.name} from ${product.merchant.name}. ` +
-    `Selling price ₹${rupees(product.sellingPrice)}, MRP ₹${rupees(product.mrp)}. ` +
-    `Delivery ${product.deliveryDays} days, warranty ${product.warrantyMonths} months. ` +
-    (ranked.length > 1
-      ? `Transparent ranking picked this over ${ranked.length - 1} other candidate(s). Score ${winner.score.toFixed(3)} (price 40%, delivery 25%, warranty 20%, reliability 15%). `
-      : "") +
-    `Invite the customer to make an offer. Do not reveal the merchant minimum price.`;
-
-  const reply = await generateCustomerResponse(facts, message);
+  agentBidsText += `\n🏆 **CURRENT BEST BID:** **${product.merchant.name}** offering **₹${rupees(product.sellingPrice)}**!`;
+  agentBidsText += `\n\n*Make a counter-offer (e.g., ₹44,500) to force all merchant AI agents to submit lower bids!*`;
 
   return NextResponse.json({
-    reply,
+    reply: agentBidsText,
     sessionId: session.id,
     parsed,
     product,
+    bestOffer: {
+      pricePaise: product.sellingPrice,
+      merchantName: product.merchant.name,
+      productName: product.name,
+      mrp: product.mrp,
+      warrantyMonths: product.warrantyMonths,
+      deliveryDays: product.deliveryDays,
+      inventory: product.inventory,
+      currentRound: 1,
+      maxRounds: product.maxRounds,
+    },
     ranking: ranked.map((r) => ({
       productId: r.productId,
       name: r.product.name,
       merchant: r.product.merchant.name,
       sellingPrice: r.pricePaise,
       score: r.score,
-      breakdown: r.breakdown,
     })),
   });
 }
@@ -230,7 +247,17 @@ async function handleOffer(session, parsed, user) {
 
   const offerPaise = Math.round(Number(parsed.offer_amount_rupees) * 100);
   const round = session.currentRound + 1;
-  const product = session.product;
+
+  // Find all competing products in the same category or scope
+  const competingProducts = await prisma.product.findMany({
+    where: {
+      active: true,
+      category: session.product.category,
+    },
+    include: { merchant: true },
+  });
+
+  const allProducts = competingProducts.length > 0 ? competingProducts : [session.product];
 
   await logAudit(session.id, "CUSTOMER_OFFER", "CUSTOMER", {
     offerPaise,
@@ -238,68 +265,125 @@ async function handleOffer(session, parsed, user) {
     customerId: user?.id || null,
   });
 
-  const policy = policyFromProduct(product);
-  const engine = new NegotiationEngine(policy);
-  const decision = engine.processOffer({
-    customerOfferPaise: offerPaise,
-    round,
-    previousMerchantOffer: session.lastMerchantOffer ?? product.sellingPrice,
-  });
+  // Evaluate offer against ALL merchant AI agents
+  const merchantResults = [];
 
-  await logAudit(session.id, "NEGOTIATION_ROUND", "NEGOTIATION_ENGINE", decision, decision.explanation);
+  for (const prod of allProducts) {
+    const policy = policyFromProduct(prod);
+    const engine = new NegotiationEngine(policy);
+    const decision = engine.processOffer({
+      customerOfferPaise: offerPaise,
+      round,
+      previousMerchantOffer: prod.id === session.productId ? (session.lastMerchantOffer ?? prod.sellingPrice) : prod.sellingPrice,
+    });
 
-  if (!decision.validation.allowed && decision.action !== "COUNTER") {
-    await logAudit(session.id, "POLICY_REJECT", "POLICY_ENGINE", decision.validation, decision.validation.reason);
+    const replyText = await generateMerchantResponse(decision, prod.name, round, prod.maxRounds);
+
+    merchantResults.push({
+      product: prod,
+      decision,
+      replyText,
+    });
   }
 
-  if (decision.action === "ACCEPT") {
+  // Find the winning bid among merchant AI agents
+  // Priority: ACCEPT > lowest COUNTER price > highest reliability
+  const acceptedBids = merchantResults.filter((r) => r.decision.action === "ACCEPT");
+  const counterBids = merchantResults.filter((r) => r.decision.action === "COUNTER");
+
+  let winningResult = null;
+
+  if (acceptedBids.length > 0) {
+    winningResult = acceptedBids.sort((a, b) => a.product.sellingPrice - b.product.sellingPrice)[0];
+  } else if (counterBids.length > 0) {
+    winningResult = counterBids.sort((a, b) => a.decision.pricePaise - b.decision.pricePaise)[0];
+  } else {
+    winningResult = merchantResults[0];
+  }
+
+  const { product: winProduct, decision: winDecision } = winningResult;
+
+  await logAudit(session.id, "NEGOTIATION_ROUND", "NEGOTIATION_ENGINE", winDecision, winDecision.explanation);
+
+  let updatedStatus = "NEGOTIATING";
+  let agreedPricePaise = null;
+
+  if (winDecision.action === "ACCEPT") {
+    updatedStatus = "AWAITING_APPROVAL";
+    agreedPricePaise = offerPaise;
+
     await prisma.negotiationSession.update({
       where: { id: session.id },
       data: {
+        productId: winProduct.id,
         currentRound: round,
         lastCustomerOffer: offerPaise,
         agreedPrice: offerPaise,
         status: "AWAITING_APPROVAL",
         customerApproved: false,
-        offerExpiresAt: new Date(Date.now() + product.offerValidityMinutes * 60_000),
+        offerExpiresAt: new Date(Date.now() + winProduct.offerValidityMinutes * 60_000),
       },
     });
-    await logAudit(session.id, "OFFER_ACCEPTED", "NEGOTIATION_ENGINE", { price: offerPaise });
-  } else if (decision.action === "COUNTER") {
+    await logAudit(session.id, "OFFER_ACCEPTED", "NEGOTIATION_ENGINE", { price: offerPaise, merchant: winProduct.merchant.name });
+  } else if (winDecision.action === "COUNTER") {
+    updatedStatus = "NEGOTIATING";
+
     await prisma.negotiationSession.update({
       where: { id: session.id },
       data: {
+        productId: winProduct.id,
         currentRound: round,
         lastCustomerOffer: offerPaise,
-        lastMerchantOffer: decision.pricePaise,
+        lastMerchantOffer: winDecision.pricePaise,
         status: "NEGOTIATING",
       },
     });
-    await logAudit(session.id, "COUNTER_OFFER", "NEGOTIATION_ENGINE", { price: decision.pricePaise }, decision.explanation);
+    await logAudit(session.id, "COUNTER_OFFER", "NEGOTIATION_ENGINE", { price: winDecision.pricePaise, merchant: winProduct.merchant.name }, winDecision.explanation);
   } else {
+    updatedStatus = "FAILED";
     await prisma.negotiationSession.update({
       where: { id: session.id },
-      data: { currentRound: round, lastCustomerOffer: offerPaise, status: "FAILED", failureReason: decision.explanation },
+      data: { currentRound: round, lastCustomerOffer: offerPaise, status: "FAILED", failureReason: winDecision.explanation },
     });
   }
 
-  const merchantReply = await generateMerchantResponse(
-    decision,
-    product.name,
-    round,
-    session.maxRounds
-  );
+  // Format multi-agent responses for the customer chat
+  let multiAgentReply = `🤖 **Multi-Agent Merchant Bidding Results (Round ${round}/${winProduct.maxRounds}):**\n\n`;
+
+  merchantResults.forEach((res) => {
+    const isWinner = res.product.id === winProduct.id;
+    const badge = isWinner ? "🏆 *BEST BID*" : "";
+    multiAgentReply += `• **${res.product.merchant.name} AI Agent**: ${res.replyText} ${badge}\n\n`;
+  });
+
+  if (winDecision.action === "ACCEPT") {
+    multiAgentReply += `🎉 **WINNING OFFER LOCKED:** **${winProduct.merchant.name}** accepted your price of **₹${rupees(offerPaise)}**! Click **Approve & Pay** to capture this deal via Razorpay.`;
+  } else if (winDecision.action === "COUNTER") {
+    multiAgentReply += `⭐ **CURRENT BEST BID:** **${winProduct.merchant.name}** counter-offers **₹${rupees(winDecision.pricePaise)}**!`;
+  }
 
   return NextResponse.json({
-    reply: merchantReply,
+    reply: multiAgentReply,
     sessionId: session.id,
     decision: {
-      action: decision.action,
-      price: decision.pricePaise,
-      explanation: decision.explanation,
+      action: winDecision.action,
+      price: winDecision.pricePaise,
+      explanation: winDecision.explanation,
     },
-    awaitingApproval: decision.action === "ACCEPT",
-    agreedPrice: decision.action === "ACCEPT" ? offerPaise : null,
-    product,
+    bestOffer: {
+      pricePaise: winDecision.action === "ACCEPT" ? offerPaise : winDecision.pricePaise,
+      merchantName: winProduct.merchant.name,
+      productName: winProduct.name,
+      mrp: winProduct.mrp,
+      warrantyMonths: winProduct.warrantyMonths,
+      deliveryDays: winProduct.deliveryDays,
+      inventory: winProduct.inventory,
+      currentRound: round,
+      maxRounds: winProduct.maxRounds,
+      status: winDecision.action,
+    },
+    awaitingApproval: winDecision.action === "ACCEPT",
+    agreedPrice: winDecision.action === "ACCEPT" ? offerPaise : null,
+    product: winProduct,
   });
 }

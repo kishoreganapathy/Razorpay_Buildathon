@@ -3,9 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ApprovalCard } from "./ApprovalCard";
-import { AuditTimeline } from "./AuditTimeline";
 
 function rupees(paise) {
+  if (!paise && paise !== 0) return "0";
   return (paise / 100).toLocaleString("en-IN");
 }
 
@@ -21,30 +21,22 @@ export function Chat() {
   const [messages, setMessages] = useState([
     {
       role: "assistant",
-      text: "Welcome to Razorpay AI Bargaining. Describe what you're looking to buy, or make a price counter offer. Our agent negotiates inside verified merchant guardrails.",
+      text: "Welcome to Razorpay Multi-Agent AI Bargaining. Describe what you want to buy, and multiple AI Merchant Agents will bid against each other to offer you the best price under verified policy guardrails.",
     },
   ]);
   const [input, setInput] = useState("");
   const [sessionId, setSessionId] = useState(null);
   const [product, setProduct] = useState(null);
+  const [bestOffer, setBestOffer] = useState(null);
   const [awaitingApproval, setAwaitingApproval] = useState(false);
   const [agreedPrice, setAgreedPrice] = useState(null);
   const [paid, setPaid] = useState(false);
-  const [events, setEvents] = useState([]);
   const [busy, setBusy] = useState(false);
   const bottom = useRef(null);
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, awaitingApproval]);
-
-  async function refreshAudit(id) {
-    if (!id) return;
-    const res = await fetch(`/api/audit/${id}`);
-    if (!res.ok) return;
-    const data = await res.json();
-    setEvents(data.events || []);
-  }
+  }, [messages, awaitingApproval, bestOffer]);
 
   async function send(text) {
     const content = (text ?? input).trim();
@@ -66,12 +58,12 @@ export function Chat() {
       }
       if (data.sessionId) setSessionId(data.sessionId);
       if (data.product) setProduct(data.product);
+      if (data.bestOffer) setBestOffer(data.bestOffer);
       if (data.awaitingApproval || data.readyForPayment) {
         setAwaitingApproval(true);
         setAgreedPrice(data.agreedPrice || data.decision?.price);
       }
       setMessages((m) => [...m, { role: "assistant", text: data.reply || data.error || "Something went wrong." }]);
-      await refreshAudit(data.sessionId || sessionId);
     } catch {
       setMessages((m) => [...m, { role: "assistant", text: "Network error. Try again." }]);
     } finally {
@@ -79,14 +71,93 @@ export function Chat() {
     }
   }
 
+  const activeBestPrice = bestOffer?.pricePaise || (agreedPrice ? agreedPrice : product?.sellingPrice);
+  const activeMerchantName = bestOffer?.merchantName || product?.merchant?.name || "Lead AI Merchant";
+  const activeProductName = bestOffer?.productName || product?.name;
+  const activeMrp = bestOffer?.mrp || product?.mrp;
+  const savingsPaise = activeMrp && activeBestPrice ? Math.max(0, activeMrp - activeBestPrice) : 0;
+  const discountPercent = activeMrp && activeMrp > 0 ? Math.round((savingsPaise / activeMrp) * 100) : 0;
+
   return (
-    <div className="grid gap-6 lg:grid-cols-[1.25fr_0.75fr]">
-      {/* Left Chat Window */}
-      <section className="flex min-h-[680px] flex-col rounded-3xl border border-slate-800/80 bg-gradient-to-b from-[#06152B]/90 via-[#040E20]/90 to-[#02042B]/95 shadow-2xl backdrop-blur-xl overflow-hidden">
+    <div className="max-w-4xl mx-auto w-full flex flex-col space-y-6">
+      {/* 🌟 PROMINENT CURRENT BEST OFFER HIGHLIGHT BANNER */}
+      {activeProductName && activeBestPrice && (
+        <div className="relative overflow-hidden rounded-3xl border border-amber-500/40 bg-gradient-to-r from-[#0F1B38] via-[#09152B] to-[#040E20] p-6 shadow-2xl backdrop-blur-xl">
+          <div className="absolute top-0 right-0 -mt-8 -mr-8 h-48 w-48 rounded-full bg-amber-500/10 blur-2xl pointer-events-none" />
+
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 relative z-10 border-b border-slate-800/80 pb-4">
+            <div>
+              <div className="inline-flex items-center gap-2 rounded-full border border-amber-400/40 bg-amber-400/10 px-3 py-1 text-xs font-bold text-amber-300 mb-2">
+                <span className="flex h-2 w-2 rounded-full bg-amber-400 animate-ping" />
+                <span>⭐ CURRENT BEST BID</span>
+                {bestOffer?.currentRound && (
+                  <span className="text-[10px] font-mono opacity-80 border-l border-amber-400/30 pl-2">
+                    Round {bestOffer.currentRound}/{bestOffer.maxRounds || 3}
+                  </span>
+                )}
+              </div>
+              <h3 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
+                {activeProductName}
+              </h3>
+              <p className="text-xs text-slate-300 mt-1 flex items-center gap-2">
+                <span>Offered by: <strong className="text-[#38BDF8]">{activeMerchantName} AI Agent</strong></span>
+              </p>
+            </div>
+
+            <div className="sm:text-right bg-slate-900/80 border border-slate-800 rounded-2xl px-5 py-3 shadow-inner">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Lowest Negotiated Price</div>
+              <div className="text-2xl sm:text-3xl font-black bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-300 bg-clip-text text-transparent">
+                ₹{rupees(activeBestPrice)}
+              </div>
+              {activeMrp && savingsPaise > 0 && (
+                <div className="text-xs text-amber-400 font-medium mt-0.5">
+                  <span className="line-through text-slate-500 mr-1.5">MRP ₹{rupees(activeMrp)}</span>
+                  <span>Save ₹{rupees(savingsPaise)} ({discountPercent}% OFF)</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-300">
+            <div className="flex flex-wrap items-center gap-4">
+              <span className="flex items-center gap-1.5 text-slate-300">
+                <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                {product?.warrantyMonths || bestOffer?.warrantyMonths || 24} Mo Warranty
+              </span>
+              <span className="flex items-center gap-1.5 text-slate-300">
+                <svg className="w-4 h-4 text-[#00C2FF]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+                {product?.deliveryDays || bestOffer?.deliveryDays || 2} Day Express Delivery
+              </span>
+              <span className="flex items-center gap-1.5 text-slate-300">
+                <svg className="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Verified Policy Guardrails
+              </span>
+            </div>
+
+            {sessionId && (
+              <Link
+                href={`/audit/${sessionId}`}
+                className="inline-flex items-center gap-1 text-[11px] text-[#38BDF8] hover:text-white transition-all underline font-mono"
+              >
+                <span>Audit Trail #{sessionId.slice(0, 8)}</span>
+              </Link>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Main Chat Window */}
+      <section className="flex min-h-[620px] flex-col rounded-3xl border border-slate-800/80 bg-gradient-to-b from-[#06152B]/90 via-[#040E20]/90 to-[#02042B]/95 shadow-2xl backdrop-blur-xl overflow-hidden">
         {/* Header Bar */}
-        <div className="flex items-center justify-between border-b border-slate-800/80 bg-[#02042B]/60 px-5 py-4">
+        <div className="flex items-center justify-between border-b border-slate-800/80 bg-[#02042B]/60 px-6 py-4">
           <div className="flex items-center gap-3">
-            <div className="relative flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-[#0066FF] to-[#00C2FF] text-white shadow-md shadow-blue-600/30">
+            <div className="relative flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-[#0066FF] to-[#00C2FF] text-white shadow-md shadow-blue-600/30">
               <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
               </svg>
@@ -96,26 +167,31 @@ export function Chat() {
               </span>
             </div>
             <div>
-              <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                Razorpay Negotiator AI
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
+                Multi-Agent AI Merchant Desk
                 <span className="rounded bg-[#0066FF]/20 border border-[#0066FF]/40 px-2 py-0.5 text-[10px] font-mono text-[#38BDF8]">
-                  BOUNDED
+                  COMPETING AGENTS
                 </span>
               </h2>
-              <p className="text-[11px] text-slate-400">Intelligent Price Bargaining & Real-time Verification</p>
+              <p className="text-xs text-slate-400">Multiple Merchant AI Agents Negotiating to Give You the Best Deal</p>
             </div>
           </div>
 
           {sessionId && (
-            <div className="hidden sm:flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-1 text-[11px] font-mono text-slate-400">
-              <span>Session:</span>
-              <span className="text-[#38BDF8] font-semibold">{sessionId.slice(0, 8)}…</span>
-            </div>
+            <Link
+              href={`/audit/${sessionId}`}
+              className="hidden sm:inline-flex items-center gap-1.5 rounded-xl border border-slate-800 bg-slate-900/80 px-3 py-1.5 text-xs text-[#38BDF8] hover:border-[#0066FF] hover:text-white transition-all font-mono"
+            >
+              <span>View Audit Log</span>
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+              </svg>
+            </Link>
           )}
         </div>
 
         {/* Message Stream */}
-        <div className="flex-1 space-y-4 overflow-y-auto p-5 scrollbar-thin">
+        <div className="flex-1 space-y-4 overflow-y-auto p-6 scrollbar-thin">
           {messages.map((m, i) => (
             <div
               key={i}
@@ -124,12 +200,12 @@ export function Chat() {
               }`}
             >
               {m.role === "assistant" && (
-                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#0066FF]/20 border border-[#0066FF]/40 text-[#38BDF8] mt-1">
-                  <span className="text-xs font-bold">RZP</span>
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#0066FF]/20 border border-[#0066FF]/40 text-[#38BDF8] mt-1 shadow-sm">
+                  <span className="text-xs font-bold">AI</span>
                 </div>
               )}
               <div
-                className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                className={`max-w-[88%] rounded-2xl px-5 py-3.5 text-sm leading-relaxed whitespace-pre-line ${
                   m.role === "user"
                     ? "bg-gradient-to-r from-[#0066FF] to-[#0077FF] text-white shadow-md shadow-blue-600/20 font-medium rounded-tr-none"
                     : "bg-[#0A192F]/90 border border-slate-800 text-slate-100 shadow-sm rounded-tl-none"
@@ -138,7 +214,7 @@ export function Chat() {
                 {m.text}
               </div>
               {m.role === "user" && (
-                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-800 border border-slate-700 text-slate-300 mt-1">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-800 border border-slate-700 text-slate-300 mt-1 shadow-sm">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
                   </svg>
@@ -147,87 +223,46 @@ export function Chat() {
             </div>
           ))}
 
-          {/* Active Product Card */}
-          {product && (
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl backdrop-blur-md">
-              <div className="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
-                <div>
-                  <span className="inline-block rounded bg-[#0066FF]/15 text-[#38BDF8] text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 mb-1">
-                    {product.category || "Matched Product"}
-                  </span>
-                  <h3 className="text-base font-bold text-white">{product.name}</h3>
-                </div>
-                <div className="text-right">
-                  <span className="text-xs text-slate-400 line-through">MRP ₹{rupees(product.mrp)}</span>
-                  <div className="text-lg font-extrabold text-[#38BDF8]">
-                    Listed: ₹{rupees(product.sellingPrice)}
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-300">
-                <div className="flex items-center gap-3">
-                  <span className="flex items-center gap-1 text-slate-400">
-                    <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    {product.warrantyMonths} Mo Warranty
-                  </span>
-                  <span className="flex items-center gap-1 text-slate-400">
-                    <svg className="w-4 h-4 text-[#00C2FF]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                    </svg>
-                    {product.deliveryDays} Day Express Delivery
-                  </span>
-                </div>
-                <span className="rounded bg-slate-800 px-2 py-1 text-[11px] font-mono text-slate-300">
-                  Stock: {product.inventory} units
-                </span>
-              </div>
-            </div>
-          )}
-
           {/* Deal Locked / Approval Card */}
           {awaitingApproval && agreedPrice && !paid && (
-            <div className="my-2">
+            <div className="my-3">
               <ApprovalCard
                 sessionId={sessionId}
                 amountPaise={agreedPrice}
-                productName={product?.name || "Product"}
+                productName={activeProductName || product?.name || "Winning Bid Product"}
                 onPaid={() => {
                   setPaid(true);
                   setMessages((m) => [
                     ...m,
-                    { role: "assistant", text: "Payment captured successfully via Razorpay! Your order is confirmed." },
+                    { role: "assistant", text: "🎉 Payment captured successfully via Razorpay! Your winning offer is locked & confirmed." },
                   ]);
-                  refreshAudit(sessionId);
                 }}
-                onFailed={() => refreshAudit(sessionId)}
+                onFailed={() => {}}
               />
             </div>
           )}
 
           {/* Success Banner */}
           {paid && (
-            <div className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 p-4 text-sm text-emerald-300 flex items-center justify-between">
+            <div className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 p-5 text-sm text-emerald-300 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
               <div className="flex items-center gap-3">
-                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400">
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" />
                   </svg>
                 </div>
                 <div>
-                  <p className="font-bold text-white">Payment Captured via Razorpay</p>
-                  <p className="text-xs text-emerald-300/80">Inventory updated & immutable audit log sealed.</p>
+                  <p className="font-bold text-white text-base">Payment Captured via Razorpay</p>
+                  <p className="text-xs text-emerald-300/80">Inventory updated & immutable audit log sealed for order.</p>
                 </div>
               </div>
 
               <Link
-                className="inline-flex items-center gap-1 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-emerald-400 transition-all"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500 px-4 py-2 text-xs font-bold text-slate-950 hover:bg-emerald-400 transition-all shadow-md"
                 href={`/audit/${sessionId}`}
               >
-                <span>View Audit</span>
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <span>View Full Audit</span>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
                 </svg>
               </Link>
@@ -238,15 +273,15 @@ export function Chat() {
         </div>
 
         {/* Input Form & Suggestions */}
-        <div className="border-t border-slate-800/80 bg-[#02042B]/80 p-4">
+        <div className="border-t border-slate-800/80 bg-[#02042B]/80 p-5">
           <div className="mb-3 flex flex-wrap gap-2">
             {SUGGESTIONS.map((s) => (
               <button
                 key={s}
                 onClick={() => send(s)}
-                className="rounded-full border border-slate-800 bg-slate-900/60 px-3 py-1 text-xs text-slate-300 hover:border-[#0066FF] hover:bg-[#0066FF]/10 hover:text-white transition-all"
+                className="rounded-full border border-slate-800 bg-slate-900/60 px-3.5 py-1.5 text-xs text-slate-300 hover:border-[#0066FF] hover:bg-[#0066FF]/10 hover:text-white transition-all shadow-sm"
               >
-                {s.length > 45 ? s.slice(0, 45) + "…" : s}
+                {s}
               </button>
             ))}
           </div>
@@ -261,12 +296,12 @@ export function Chat() {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Describe what product you want, or propose a price offer…"
-              className="flex-1 rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-3 text-sm text-slate-100 outline-none focus:border-[#0066FF] focus:ring-1 focus:ring-[#0066FF] transition-all placeholder:text-slate-500"
+              placeholder="Describe what product you want, or propose a price counter offer…"
+              className="flex-1 rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-3.5 text-sm text-slate-100 outline-none focus:border-[#0066FF] focus:ring-1 focus:ring-[#0066FF] transition-all placeholder:text-slate-500 shadow-inner"
             />
             <button
               disabled={busy}
-              className="inline-flex items-center gap-2 rounded-xl bg-[#0066FF] px-5 py-3 text-sm font-semibold text-white shadow-md shadow-blue-600/30 hover:bg-[#0052CC] hover:shadow-blue-600/50 transition-all disabled:opacity-50 active:scale-[0.98]"
+              className="inline-flex items-center gap-2 rounded-xl bg-[#0066FF] px-6 py-3.5 text-sm font-semibold text-white shadow-md shadow-blue-600/30 hover:bg-[#0052CC] hover:shadow-blue-600/50 transition-all disabled:opacity-50 active:scale-[0.98]"
             >
               {busy ? (
                 <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -285,36 +320,6 @@ export function Chat() {
           </form>
         </div>
       </section>
-
-      {/* Right Column: Live Audit Console */}
-      <aside className="flex flex-col rounded-3xl border border-slate-800/80 bg-gradient-to-b from-[#06152B]/90 via-[#040E20]/90 to-[#02042B]/95 p-5 shadow-2xl backdrop-blur-xl">
-        <div className="mb-4 flex items-center justify-between border-b border-slate-800/80 pb-3">
-          <div>
-            <h2 className="text-sm font-bold text-white flex items-center gap-2">
-              <span>Live Policy Audit</span>
-              <span className="flex h-2 w-2 rounded-full bg-[#00C2FF]" />
-            </h2>
-            <p className="text-[11px] text-slate-400 mt-0.5">Real-time Policy Evaluation Stream</p>
-          </div>
-
-          {sessionId && (
-            <Link
-              href={`/audit/${sessionId}`}
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-1 text-xs text-[#38BDF8] hover:border-[#0066FF] hover:text-white transition-all"
-            >
-              <span>Full Log</span>
-              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-              </svg>
-            </Link>
-          )}
-        </div>
-
-        <div className="flex-1 overflow-y-auto pr-1">
-          <AuditTimeline events={events} />
-        </div>
-      </aside>
     </div>
   );
 }
-
