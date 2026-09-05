@@ -11,22 +11,21 @@ function rupees(paise) {
 
 const SUGGESTIONS = [
   "I want a 55-inch 4K TV under ₹45,000 with fast delivery",
-  "I'll take it for ₹40,000",
-  "Can you offer ₹42,000?",
-  "₹44,500 final offer",
-  "I approve this price",
+  "I need a 15-inch laptop for work",
+  "Show 4K Smart TVs under ₹50,000",
 ];
 
 export function Chat() {
   const [messages, setMessages] = useState([
     {
       role: "assistant",
-      text: "Welcome to Razorpay Multi-Agent AI Bargaining. Describe what you want to buy, and multiple AI Merchant Agents will bid against each other to offer you the best price under verified policy guardrails.",
+      text: "Welcome to Razorpay AI Commerce. Search for any product to view live offers from competing Merchant AI Agents, select an offer, and negotiate your best price!",
     },
   ]);
   const [input, setInput] = useState("");
   const [sessionId, setSessionId] = useState(null);
   const [product, setProduct] = useState(null);
+  const [offerListing, setOfferListing] = useState([]);
   const [bestOffer, setBestOffer] = useState(null);
   const [awaitingApproval, setAwaitingApproval] = useState(false);
   const [agreedPrice, setAgreedPrice] = useState(null);
@@ -36,39 +35,64 @@ export function Chat() {
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, awaitingApproval, bestOffer]);
+  }, [messages, awaitingApproval, offerListing, bestOffer]);
 
-  async function send(text) {
+  async function send(text, selectedId = null) {
     const content = (text ?? input).trim();
-    if (!content || busy) return;
-    setInput("");
-    setMessages((m) => [...m, { role: "user", text: content }]);
+    if (!content && !selectedId) return;
+    if (busy) return;
+
+    if (content) {
+      setInput("");
+      setMessages((m) => [...m, { role: "user", text: content }]);
+    }
     setBusy(true);
+
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: content, sessionId }),
+        body: JSON.stringify({
+          message: content || undefined,
+          sessionId,
+          selectedProductId: selectedId || undefined,
+        }),
       });
+
       let data = {};
       try {
         data = await res.json();
       } catch {
         data = { error: "Server returned invalid response." };
       }
+
       if (data.sessionId) setSessionId(data.sessionId);
       if (data.product) setProduct(data.product);
+      if (data.offerListing) setOfferListing(data.offerListing);
       if (data.bestOffer) setBestOffer(data.bestOffer);
       if (data.awaitingApproval || data.readyForPayment) {
         setAwaitingApproval(true);
         setAgreedPrice(data.agreedPrice || data.decision?.price);
       }
+
       setMessages((m) => [...m, { role: "assistant", text: data.reply || data.error || "Something went wrong." }]);
     } catch {
       setMessages((m) => [...m, { role: "assistant", text: "Network error. Try again." }]);
     } finally {
       setBusy(false);
     }
+  }
+
+  function handleSelectOffer(offer) {
+    setOfferListing([]);
+    setMessages((m) => [
+      ...m,
+      {
+        role: "user",
+        text: `Selected ${offer.productName} from ${offer.merchantName} at ₹${rupees(offer.sellingPrice)}`,
+      },
+    ]);
+    send(null, offer.id);
   }
 
   const activeBestPrice = bestOffer?.pricePaise || (agreedPrice ? agreedPrice : product?.sellingPrice);
@@ -80,7 +104,7 @@ export function Chat() {
 
   return (
     <div className="max-w-4xl mx-auto w-full flex flex-col space-y-6">
-      {/* 🌟 PROMINENT CURRENT BEST OFFER HIGHLIGHT BANNER */}
+      {/* 🌟 PROMINENT CURRENT TARGET OFFER HERO CARD */}
       {activeProductName && activeBestPrice && (
         <div className="relative overflow-hidden rounded-3xl border border-amber-500/40 bg-gradient-to-r from-[#0F1B38] via-[#09152B] to-[#040E20] p-6 shadow-2xl backdrop-blur-xl">
           <div className="absolute top-0 right-0 -mt-8 -mr-8 h-48 w-48 rounded-full bg-amber-500/10 blur-2xl pointer-events-none" />
@@ -89,7 +113,7 @@ export function Chat() {
             <div>
               <div className="inline-flex items-center gap-2 rounded-full border border-amber-400/40 bg-amber-400/10 px-3 py-1 text-xs font-bold text-amber-300 mb-2">
                 <span className="flex h-2 w-2 rounded-full bg-amber-400 animate-ping" />
-                <span>⭐ CURRENT BEST BID</span>
+                <span>⭐ ACTIVE TARGET OFFER</span>
                 {bestOffer?.currentRound && (
                   <span className="text-[10px] font-mono opacity-80 border-l border-amber-400/30 pl-2">
                     Round {bestOffer.currentRound}/{bestOffer.maxRounds || 3}
@@ -99,13 +123,13 @@ export function Chat() {
               <h3 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
                 {activeProductName}
               </h3>
-              <p className="text-xs text-slate-300 mt-1 flex items-center gap-2">
-                <span>Offered by: <strong className="text-[#38BDF8]">{activeMerchantName} AI Agent</strong></span>
+              <p className="text-xs text-slate-300 mt-1">
+                Merchant AI Agent: <strong className="text-[#38BDF8]">{activeMerchantName}</strong>
               </p>
             </div>
 
             <div className="sm:text-right bg-slate-900/80 border border-slate-800 rounded-2xl px-5 py-3 shadow-inner">
-              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Lowest Negotiated Price</div>
+              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Current Offer Price</div>
               <div className="text-2xl sm:text-3xl font-black bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-300 bg-clip-text text-transparent">
                 ₹{rupees(activeBestPrice)}
               </div>
@@ -118,62 +142,56 @@ export function Chat() {
             </div>
           </div>
 
-          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-300">
-            <div className="flex flex-wrap items-center gap-4">
-              <span className="flex items-center gap-1.5 text-slate-300">
-                <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                {product?.warrantyMonths || bestOffer?.warrantyMonths || 24} Mo Warranty
-              </span>
-              <span className="flex items-center gap-1.5 text-slate-300">
-                <svg className="w-4 h-4 text-[#00C2FF]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
-                {product?.deliveryDays || bestOffer?.deliveryDays || 2} Day Express Delivery
-              </span>
-              <span className="flex items-center gap-1.5 text-slate-300">
-                <svg className="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                Verified Policy Guardrails
-              </span>
-            </div>
+          {/* Quick Counter Offer Preset Buttons */}
+          {!awaitingApproval && !paid && activeBestPrice && (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 pt-1">
+              <div className="text-xs font-bold text-slate-300 flex items-center gap-2">
+                <span>Quick Counter-Bids:</span>
+              </div>
 
-            {sessionId && (
-              <Link
-                href={`/audit/${sessionId}`}
-                className="inline-flex items-center gap-1 text-[11px] text-[#38BDF8] hover:text-white transition-all underline font-mono"
-              >
-                <span>Audit Trail #{sessionId.slice(0, 8)}</span>
-              </Link>
-            )}
-          </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => send(`I offer ₹${(Math.round((activeBestPrice * 0.93) / 100000) * 1000).toLocaleString("en-IN")}`)}
+                  className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3.5 py-1.5 text-xs font-bold text-emerald-300 hover:bg-emerald-500 hover:text-slate-950 transition-all shadow-sm"
+                >
+                  💬 Bid ₹{(Math.round((activeBestPrice * 0.93) / 100000) * 1000).toLocaleString("en-IN")} (-7%)
+                </button>
+                <button
+                  onClick={() => send(`I offer ₹${(Math.round((activeBestPrice * 0.90) / 100000) * 1000).toLocaleString("en-IN")}`)}
+                  className="rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-3.5 py-1.5 text-xs font-bold text-cyan-300 hover:bg-cyan-500 hover:text-slate-950 transition-all shadow-sm"
+                >
+                  💬 Bid ₹{(Math.round((activeBestPrice * 0.90) / 100000) * 1000).toLocaleString("en-IN")} (-10%)
+                </button>
+                <button
+                  onClick={() => send(`I offer ₹${(Math.round((activeBestPrice * 0.85) / 100000) * 1000).toLocaleString("en-IN")}`)}
+                  className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3.5 py-1.5 text-xs font-bold text-amber-300 hover:bg-amber-500 hover:text-slate-950 transition-all shadow-sm"
+                >
+                  💬 Bid ₹{(Math.round((activeBestPrice * 0.85) / 100000) * 1000).toLocaleString("en-IN")} (-15%)
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Main Chat Window */}
+      {/* Main Chat & Interactive Offers Desk */}
       <section className="flex min-h-[620px] flex-col rounded-3xl border border-slate-800/80 bg-gradient-to-b from-[#06152B]/90 via-[#040E20]/90 to-[#02042B]/95 shadow-2xl backdrop-blur-xl overflow-hidden">
         {/* Header Bar */}
         <div className="flex items-center justify-between border-b border-slate-800/80 bg-[#02042B]/60 px-6 py-4">
           <div className="flex items-center gap-3">
             <div className="relative flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-[#0066FF] to-[#00C2FF] text-white shadow-md shadow-blue-600/30">
               <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
               </svg>
-              <span className="absolute -bottom-0.5 -right-0.5 flex h-3 w-3">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500 border-2 border-[#02042B]"></span>
-              </span>
             </div>
             <div>
               <h2 className="text-base font-bold text-white flex items-center gap-2">
-                Multi-Agent AI Merchant Desk
+                Razorpay Smart Commerce
                 <span className="rounded bg-[#0066FF]/20 border border-[#0066FF]/40 px-2 py-0.5 text-[10px] font-mono text-[#38BDF8]">
-                  COMPETING AGENTS
+                  VISUAL BIDDING
                 </span>
               </h2>
-              <p className="text-xs text-slate-400">Multiple Merchant AI Agents Negotiating to Give You the Best Deal</p>
+              <p className="text-xs text-slate-400">Select Competing Merchant Offers & Negotiate Instant Deals</p>
             </div>
           </div>
 
@@ -190,8 +208,8 @@ export function Chat() {
           )}
         </div>
 
-        {/* Message Stream */}
-        <div className="flex-1 space-y-4 overflow-y-auto p-6 scrollbar-thin">
+        {/* Message Stream & Visual Offers Grid */}
+        <div className="flex-1 space-y-5 overflow-y-auto p-6 scrollbar-thin">
           {messages.map((m, i) => (
             <div
               key={i}
@@ -205,7 +223,7 @@ export function Chat() {
                 </div>
               )}
               <div
-                className={`max-w-[88%] rounded-2xl px-5 py-3.5 text-sm leading-relaxed whitespace-pre-line ${
+                className={`max-w-[88%] rounded-2xl px-5 py-3.5 text-sm leading-relaxed ${
                   m.role === "user"
                     ? "bg-gradient-to-r from-[#0066FF] to-[#0077FF] text-white shadow-md shadow-blue-600/20 font-medium rounded-tr-none"
                     : "bg-[#0A192F]/90 border border-slate-800 text-slate-100 shadow-sm rounded-tl-none"
@@ -213,28 +231,87 @@ export function Chat() {
               >
                 {m.text}
               </div>
-              {m.role === "user" && (
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-800 border border-slate-700 text-slate-300 mt-1 shadow-sm">
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                  </svg>
-                </div>
-              )}
             </div>
           ))}
 
+          {/* 🛍️ VISUAL MERCHANT OFFER LISTING GRID */}
+          {offerListing && offerListing.length > 0 && (
+            <div className="my-4 space-y-3">
+              <div className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
+                <span>Available Merchant Offers ({offerListing.length}):</span>
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {offerListing.map((item, idx) => (
+                  <div
+                    key={item.id}
+                    className="relative flex flex-col justify-between rounded-2xl border border-slate-800 bg-gradient-to-b from-[#09172E] to-[#040E20] p-4 shadow-xl hover:border-[#0066FF]/60 transition-all duration-300 group"
+                  >
+                    {idx === 0 && (
+                      <span className="absolute top-2 right-2 rounded-full bg-amber-400/20 border border-amber-400/40 text-amber-300 text-[10px] font-bold px-2 py-0.5">
+                        ⭐ BEST MATCH
+                      </span>
+                    )}
+
+                    <div>
+                      <span className="text-[11px] font-bold text-[#38BDF8] block mb-1">
+                        {item.merchantName} AI Agent
+                      </span>
+                      <h4 className="text-sm font-bold text-white leading-snug line-clamp-2">
+                        {item.productName}
+                      </h4>
+
+                      <div className="mt-3 flex items-baseline gap-2">
+                        <span className="text-xl font-extrabold text-emerald-400">
+                          ₹{rupees(item.sellingPrice)}
+                        </span>
+                        {item.mrp && item.mrp > item.sellingPrice && (
+                          <span className="text-xs text-slate-400 line-through">
+                            ₹{rupees(item.mrp)}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="mt-3 space-y-1 text-[11px] text-slate-300 border-t border-slate-800/80 pt-2.5">
+                        <div className="flex items-center gap-1.5">
+                          <svg className="w-3.5 h-3.5 text-emerald-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                          </svg>
+                          <span>{item.warrantyMonths} Mo Warranty</span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <svg className="w-3.5 h-3.5 text-[#00C2FF] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                          </svg>
+                          <span>{item.deliveryDays}-Day Express Delivery</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => handleSelectOffer(item)}
+                      className="mt-4 w-full inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#0066FF] to-[#00C2FF] px-4 py-2.5 text-xs font-bold text-white shadow-md shadow-blue-600/30 group-hover:from-blue-600 group-hover:to-cyan-400 transition-all active:scale-[0.98]"
+                    >
+                      <span>⚡ Select & Negotiate</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Deal Locked / Approval Card */}
           {awaitingApproval && agreedPrice && !paid && (
-            <div className="my-3">
+            <div className="my-4">
               <ApprovalCard
                 sessionId={sessionId}
                 amountPaise={agreedPrice}
-                productName={activeProductName || product?.name || "Winning Bid Product"}
+                productName={activeProductName || product?.name || "Winning Deal"}
                 onPaid={() => {
                   setPaid(true);
                   setMessages((m) => [
                     ...m,
-                    { role: "assistant", text: "🎉 Payment captured successfully via Razorpay! Your winning offer is locked & confirmed." },
+                    { role: "assistant", text: "🎉 Payment captured successfully via Razorpay! Your order is locked & confirmed." },
                   ]);
                 }}
                 onFailed={() => {}}
@@ -253,7 +330,7 @@ export function Chat() {
                 </div>
                 <div>
                   <p className="font-bold text-white text-base">Payment Captured via Razorpay</p>
-                  <p className="text-xs text-emerald-300/80">Inventory updated & immutable audit log sealed for order.</p>
+                  <p className="text-xs text-emerald-300/80">Inventory updated & audit log sealed for order.</p>
                 </div>
               </div>
 
@@ -296,7 +373,7 @@ export function Chat() {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Describe what product you want, or propose a price counter offer…"
+              placeholder="Search for a product, or propose a price counter offer…"
               className="flex-1 rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-3.5 text-sm text-slate-100 outline-none focus:border-[#0066FF] focus:ring-1 focus:ring-[#0066FF] transition-all placeholder:text-slate-500 shadow-inner"
             />
             <button

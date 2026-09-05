@@ -13,10 +13,59 @@ export const runtime = "nodejs";
 export async function POST(req) {
   try {
     const user = await getCurrentUser();
-    const { message, sessionId } = await req.json();
+    const { message, sessionId, selectedProductId } = await req.json();
 
-    if (!message || typeof message !== "string") {
-      return NextResponse.json({ error: "message required" }, { status: 400 });
+    if (!message && !selectedProductId) {
+      return NextResponse.json({ error: "message or selectedProductId required" }, { status: 400 });
+    }
+
+    // Handle direct merchant selection from visual card
+    if (selectedProductId) {
+      const selectedProd = await prisma.product.findUnique({
+        where: { id: selectedProductId },
+        include: { merchant: true },
+      });
+
+      if (!selectedProd) {
+        return NextResponse.json({ error: "Product not found" }, { status: 404 });
+      }
+
+      const session = await prisma.negotiationSession.create({
+        data: {
+          productId: selectedProd.id,
+          customerId: user?.id || null,
+          status: "NEGOTIATING",
+          customerIntent: JSON.stringify({ category: selectedProd.category, product: selectedProd.name }),
+          maxRounds: selectedProd.maxRounds,
+          lastMerchantOffer: selectedProd.sellingPrice,
+          offerExpiresAt: new Date(Date.now() + selectedProd.offerValidityMinutes * 60_000),
+        },
+        include: { product: { include: { merchant: true } } },
+      });
+
+      await logAudit(session.id, "PRODUCT_SELECTED", "CUSTOMER", {
+        productId: selectedProd.id,
+        merchant: selectedProd.merchant.name,
+        price: selectedProd.sellingPrice,
+      });
+
+      return NextResponse.json({
+        reply: `Selected offer from ${selectedProd.merchant.name} AI Agent for ${selectedProd.name} at ₹${rupees(selectedProd.sellingPrice)}. All competing merchants will evaluate your counter-bids!`,
+        sessionId: session.id,
+        product: selectedProd,
+        bestOffer: {
+          pricePaise: selectedProd.sellingPrice,
+          merchantName: selectedProd.merchant.name,
+          productName: selectedProd.name,
+          mrp: selectedProd.mrp,
+          warrantyMonths: selectedProd.warrantyMonths,
+          deliveryDays: selectedProd.deliveryDays,
+          inventory: selectedProd.inventory,
+          currentRound: 1,
+          maxRounds: selectedProd.maxRounds,
+          status: "NEGOTIATING",
+        },
+      });
     }
 
     let session = sessionId
@@ -54,7 +103,7 @@ export async function POST(req) {
         });
 
         return NextResponse.json({
-          reply: `Approved ₹${rupees(session.agreedPrice)}. Proceed to checkout — Razorpay will charge only this amount after a final backend check.`,
+          reply: `Approved ₹${rupees(session.agreedPrice)}. Proceed to checkout below — Razorpay will charge only this amount.`,
           sessionId: session.id,
           readyForPayment: true,
           awaitingApproval: true,
@@ -172,68 +221,55 @@ async function startSearch(message, parsed, source, user) {
     parsed.budget ? parsed.budget * 100 : undefined
   );
 
-  const winner = ranked[0];
-  const product = winner.product;
+  const winner = ranked[0].product;
 
   const session = await prisma.negotiationSession.create({
     data: {
-      productId: product.id,
+      productId: winner.id,
       customerId: user?.id || null,
       status: "NEGOTIATING",
       customerIntent: JSON.stringify(parsed),
-      maxRounds: product.maxRounds,
-      lastMerchantOffer: product.sellingPrice,
-      offerExpiresAt: new Date(Date.now() + product.offerValidityMinutes * 60_000),
+      maxRounds: winner.maxRounds,
+      lastMerchantOffer: winner.sellingPrice,
+      offerExpiresAt: new Date(Date.now() + winner.offerValidityMinutes * 60_000),
     },
     include: { product: { include: { merchant: true } } },
   });
 
   await logAudit(session.id, "CUSTOMER_REQUEST", "CUSTOMER", { message, parsed, source });
-  await logAudit(session.id, "INTENT_EXTRACTED", "CUSTOMER_AI", { parsed, source });
-  await logAudit(session.id, "PRODUCT_SELECTED", "SYSTEM", {
-    productId: product.id,
-    name: product.name,
-    ranking: ranked.map((r) => ({
-      productId: r.productId,
-      score: r.score,
-      breakdown: r.breakdown,
-    })),
-  });
 
-  // Construct multi-agent response text
-  let agentBidsText = "🤖 **Multiple AI Merchant Agents Evaluated Your Query:**\n\n";
-  ranked.forEach((r, idx) => {
-    const p = r.product;
-    const isLead = idx === 0;
-    agentBidsText += `• **${p.merchant.name} AI Agent**: "${p.name} at ₹${rupees(p.sellingPrice)} (MRP ₹${rupees(p.mrp)}, ${p.warrantyMonths} Mo Warranty, ${p.deliveryDays}-Day Express Delivery)" ${isLead ? "⭐ *LEADING BID*" : ""}\n`;
-  });
-
-  agentBidsText += `\n🏆 **CURRENT BEST BID:** **${product.merchant.name}** offering **₹${rupees(product.sellingPrice)}**!`;
-  agentBidsText += `\n\n*Make a counter-offer (e.g., ₹44,500) to force all merchant AI agents to submit lower bids!*`;
+  const offerListing = ranked.map((r) => ({
+    id: r.product.id,
+    merchantName: r.product.merchant.name,
+    productName: r.product.name,
+    category: r.product.category,
+    sellingPrice: r.product.sellingPrice,
+    mrp: r.product.mrp,
+    warrantyMonths: r.product.warrantyMonths,
+    deliveryDays: r.product.deliveryDays,
+    inventory: r.product.inventory,
+    reliabilityScore: r.product.reliabilityScore,
+    score: r.score,
+  }));
 
   return NextResponse.json({
-    reply: agentBidsText,
+    reply: `Found ${offerListing.length} competing merchant offer(s). Select an offer below or place a bid!`,
     sessionId: session.id,
     parsed,
-    product,
+    product: winner,
+    offerListing,
     bestOffer: {
-      pricePaise: product.sellingPrice,
-      merchantName: product.merchant.name,
-      productName: product.name,
-      mrp: product.mrp,
-      warrantyMonths: product.warrantyMonths,
-      deliveryDays: product.deliveryDays,
-      inventory: product.inventory,
+      pricePaise: winner.sellingPrice,
+      merchantName: winner.merchant.name,
+      productName: winner.name,
+      mrp: winner.mrp,
+      warrantyMonths: winner.warrantyMonths,
+      deliveryDays: winner.deliveryDays,
+      inventory: winner.inventory,
       currentRound: 1,
-      maxRounds: product.maxRounds,
+      maxRounds: winner.maxRounds,
+      status: "NEGOTIATING",
     },
-    ranking: ranked.map((r) => ({
-      productId: r.productId,
-      name: r.product.name,
-      merchant: r.product.merchant.name,
-      sellingPrice: r.pricePaise,
-      score: r.score,
-    })),
   });
 }
 
@@ -248,7 +284,7 @@ async function handleOffer(session, parsed, user) {
   const offerPaise = Math.round(Number(parsed.offer_amount_rupees) * 100);
   const round = session.currentRound + 1;
 
-  // Find all competing products in the same category or scope
+  // Find ALL active competing products in the same category so ALL merchant agents bid!
   const competingProducts = await prisma.product.findMany({
     where: {
       active: true,
@@ -265,7 +301,7 @@ async function handleOffer(session, parsed, user) {
     customerId: user?.id || null,
   });
 
-  // Evaluate offer against ALL merchant AI agents
+  // Evaluate customer offer against ALL merchant AI agents
   const merchantResults = [];
 
   for (const prod of allProducts) {
@@ -286,16 +322,17 @@ async function handleOffer(session, parsed, user) {
     });
   }
 
-  // Find the winning bid among merchant AI agents
-  // Priority: ACCEPT > lowest COUNTER price > highest reliability
+  // Find the winning bid among ALL merchant AI agents
   const acceptedBids = merchantResults.filter((r) => r.decision.action === "ACCEPT");
   const counterBids = merchantResults.filter((r) => r.decision.action === "COUNTER");
 
   let winningResult = null;
 
   if (acceptedBids.length > 0) {
+    // If any merchant accepts, pick the lowest original selling price or highest reliability
     winningResult = acceptedBids.sort((a, b) => a.product.sellingPrice - b.product.sellingPrice)[0];
   } else if (counterBids.length > 0) {
+    // Pick the merchant offering the lowest counter-bid price
     winningResult = counterBids.sort((a, b) => a.decision.pricePaise - b.decision.pricePaise)[0];
   } else {
     winningResult = merchantResults[0];
@@ -306,11 +343,9 @@ async function handleOffer(session, parsed, user) {
   await logAudit(session.id, "NEGOTIATION_ROUND", "NEGOTIATION_ENGINE", winDecision, winDecision.explanation);
 
   let updatedStatus = "NEGOTIATING";
-  let agreedPricePaise = null;
 
   if (winDecision.action === "ACCEPT") {
     updatedStatus = "AWAITING_APPROVAL";
-    agreedPricePaise = offerPaise;
 
     await prisma.negotiationSession.update({
       where: { id: session.id },
@@ -347,17 +382,17 @@ async function handleOffer(session, parsed, user) {
     });
   }
 
-  // Format multi-agent responses for the customer chat
+  // Construct multi-merchant bid summary for chat
   let multiAgentReply = `🤖 **Multi-Agent Merchant Bidding Results (Round ${round}/${winProduct.maxRounds}):**\n\n`;
 
   merchantResults.forEach((res) => {
     const isWinner = res.product.id === winProduct.id;
-    const badge = isWinner ? "🏆 *BEST BID*" : "";
-    multiAgentReply += `• **${res.product.merchant.name} AI Agent**: ${res.replyText} ${badge}\n\n`;
+    const badge = isWinner ? " 🏆 *BEST BID*" : "";
+    multiAgentReply += `• **${res.product.merchant.name} AI Agent**: ${res.replyText}${badge}\n\n`;
   });
 
   if (winDecision.action === "ACCEPT") {
-    multiAgentReply += `🎉 **WINNING OFFER LOCKED:** **${winProduct.merchant.name}** accepted your price of **₹${rupees(offerPaise)}**! Click **Approve & Pay** to capture this deal via Razorpay.`;
+    multiAgentReply += `🎉 **WINNING OFFER LOCKED:** **${winProduct.merchant.name}** accepted your price of **₹${rupees(offerPaise)}**! Click **Approve & Pay** below.`;
   } else if (winDecision.action === "COUNTER") {
     multiAgentReply += `⭐ **CURRENT BEST BID:** **${winProduct.merchant.name}** counter-offers **₹${rupees(winDecision.pricePaise)}**!`;
   }
