@@ -50,7 +50,7 @@ export async function POST(req) {
       });
 
       return NextResponse.json({
-        reply: `Selected offer from ${selectedProd.merchant.name} AI Agent for ${selectedProd.name} at ₹${rupees(selectedProd.sellingPrice)}. All competing merchants will evaluate your counter-bids!`,
+        reply: `Target offer selected: ${selectedProd.merchant.name} (${selectedProd.name} at ₹${rupees(selectedProd.sellingPrice)}). Enter your counter-bid below!`,
         sessionId: session.id,
         product: selectedProd,
         bestOffer: {
@@ -103,7 +103,7 @@ export async function POST(req) {
         });
 
         return NextResponse.json({
-          reply: `Approved ₹${rupees(session.agreedPrice)}. Proceed to checkout below — Razorpay will charge only this amount.`,
+          reply: `Approved ₹${rupees(session.agreedPrice)}. Click "Approve & Pay" to checkout via Razorpay!`,
           sessionId: session.id,
           readyForPayment: true,
           awaitingApproval: true,
@@ -137,7 +137,7 @@ export async function POST(req) {
         });
 
         return NextResponse.json({
-          reply: `Accepted merchant offer of ₹${rupees(agreed)}. Proceed to checkout below.`,
+          reply: `Accepted offer of ₹${rupees(agreed)}. Click "Approve & Pay" to checkout via Razorpay!`,
           sessionId: session.id,
           readyForPayment: true,
           awaitingApproval: true,
@@ -253,7 +253,7 @@ async function startSearch(message, parsed, source, user) {
   }));
 
   return NextResponse.json({
-    reply: `Found ${offerListing.length} competing merchant offer(s). Select an offer below or place a bid!`,
+    reply: `Found ${offerListing.length} competing merchant offers. Select an offer below to start negotiating!`,
     sessionId: session.id,
     parsed,
     product: winner,
@@ -329,10 +329,8 @@ async function handleOffer(session, parsed, user) {
   let winningResult = null;
 
   if (acceptedBids.length > 0) {
-    // If any merchant accepts, pick the lowest original selling price or highest reliability
     winningResult = acceptedBids.sort((a, b) => a.product.sellingPrice - b.product.sellingPrice)[0];
   } else if (counterBids.length > 0) {
-    // Pick the merchant offering the lowest counter-bid price
     winningResult = counterBids.sort((a, b) => a.decision.pricePaise - b.decision.pricePaise)[0];
   } else {
     winningResult = merchantResults[0];
@@ -382,29 +380,34 @@ async function handleOffer(session, parsed, user) {
     });
   }
 
-  // Construct multi-merchant bid summary for chat
-  let multiAgentReply = `🤖 **Multi-Agent Merchant Bidding Results (Round ${round}/${winProduct.maxRounds}):**\n\n`;
+  const structuredBids = merchantResults.map((r) => ({
+    productId: r.product.id,
+    merchantName: r.product.merchant.name,
+    productName: r.product.name,
+    action: r.decision.action,
+    pricePaise: r.decision.action === "ACCEPT" ? offerPaise : r.decision.pricePaise,
+    sellingPrice: r.product.sellingPrice,
+    mrp: r.product.mrp,
+    warrantyMonths: r.product.warrantyMonths,
+    deliveryDays: r.product.deliveryDays,
+    isWinner: r.product.id === winProduct.id,
+  }));
 
-  merchantResults.forEach((res) => {
-    const isWinner = res.product.id === winProduct.id;
-    const badge = isWinner ? " 🏆 *BEST BID*" : "";
-    multiAgentReply += `• **${res.product.merchant.name} AI Agent**: ${res.replyText}${badge}\n\n`;
-  });
-
+  let summaryReply = "";
   if (winDecision.action === "ACCEPT") {
-    multiAgentReply += `🎉 **WINNING OFFER LOCKED:** **${winProduct.merchant.name}** accepted your price of **₹${rupees(offerPaise)}**! Click **Approve & Pay** below.`;
-  } else if (winDecision.action === "COUNTER") {
-    multiAgentReply += `⭐ **CURRENT BEST BID:** **${winProduct.merchant.name}** counter-offers **₹${rupees(winDecision.pricePaise)}**!`;
+    summaryReply = `🎉 Deal Accepted! ${winProduct.merchant.name} AI Agent accepted your offer of ₹${rupees(offerPaise)}. Click "Approve & Pay" to checkout!`;
+  } else {
+    summaryReply = `Received ${structuredBids.length} merchant agent bids. Best counter-offer: ${winProduct.merchant.name} at ₹${rupees(winDecision.pricePaise)}.`;
   }
 
   return NextResponse.json({
-    reply: multiAgentReply,
+    reply: summaryReply,
     sessionId: session.id,
     decision: {
       action: winDecision.action,
       price: winDecision.pricePaise,
-      explanation: winDecision.explanation,
     },
+    bids: structuredBids,
     bestOffer: {
       pricePaise: winDecision.action === "ACCEPT" ? offerPaise : winDecision.pricePaise,
       merchantName: winProduct.merchant.name,
