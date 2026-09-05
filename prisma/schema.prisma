@@ -1,0 +1,111 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  name         String
+  role         String    @default("CUSTOMER") // CUSTOMER | MERCHANT
+  merchant     Merchant?
+  createdAt    DateTime  @default(now())
+}
+
+model Merchant {
+  id        String    @id @default(cuid())
+  userId    String    @unique
+  user      User      @relation(fields: [userId], references: [id])
+  name      String
+  email     String    @unique
+  products  Product[]
+  createdAt DateTime  @default(now())
+}
+
+model Product {
+  id                   String                 @id @default(cuid())
+  merchantId           String
+  merchant             Merchant               @relation(fields: [merchantId], references: [id])
+  name                 String
+  category             String
+  description          String                 @db.Text
+  attributes           String                 @db.Text
+  mrp                  Int
+  sellingPrice         Int
+  minimumPrice         Int
+  maxDiscount          Int
+  minProfitMargin      Float
+  costPrice            Int
+  inventory            Int
+  maxRounds            Int                    @default(3)
+  offerValidityMinutes Int                    @default(10)
+  concessionMode       String                 @default("LINEAR")
+  concessionSchedule   String?                @db.Text
+  warrantyMonths       Int                    @default(12)
+  deliveryDays         Int                    @default(3)
+  reliabilityScore     Float                  @default(0.85)
+  returnDays           Int                    @default(7)
+  active               Boolean                @default(true)
+  sessions             NegotiationSession[]
+  createdAt            DateTime               @default(now())
+}
+
+model NegotiationSession {
+  id                 String       @id @default(cuid())
+  productId          String
+  product            Product      @relation(fields: [productId], references: [id])
+  customerId         String?
+  status             String       @default("NEGOTIATING")
+  customerIntent     String       @db.Text
+  currentRound       Int          @default(0)
+  maxRounds          Int
+  lastCustomerOffer  Int?
+  lastMerchantOffer  Int?
+  agreedPrice        Int?
+  offerExpiresAt     DateTime?
+  customerApproved   Boolean      @default(false)
+  approvedAt         DateTime?
+  razorpayOrderId    String?
+  razorpayPaymentId  String?
+  paymentStatus      String?
+  failureReason      String?      @db.Text
+  orders             Order[]
+  auditEvents        AuditEvent[]
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  @@index([productId])
+  @@index([status])
+}
+
+model Order {
+  id                 String              @id @default(cuid())
+  sessionId          String
+  session            NegotiationSession  @relation(fields: [sessionId], references: [id])
+  amount             Int
+  currency           String              @default("INR")
+  status             String              @default("PENDING")
+  razorpayOrderId    String?
+  razorpayPaymentId  String?
+  createdAt          DateTime            @default(now())
+
+  @@index([sessionId])
+}
+
+model AuditEvent {
+  id          String              @id @default(cuid())
+  sessionId   String
+  session     NegotiationSession  @relation(fields: [sessionId], references: [id])
+  eventType   String
+  actor       String
+  payload     String              @db.Text
+  explanation String?             @db.Text
+  createdAt   DateTime            @default(now())
+
+  @@index([sessionId])
+}
